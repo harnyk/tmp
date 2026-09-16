@@ -169,13 +169,53 @@
     }
 
     // ---------- Выгрузка в Апофеозошную ----------
-    startDump(){
+    startDump(lift){
       if (this._dumping) return;
       this._dumping = true;
       this.liftPrompt.setVisible(false);
       const hint = document.getElementById("hint"); if (hint) hint.classList.add("hide");
       this.pts = {}; this.jumpReq = null; this.dumpReq = false;   // гасим ввод
       this.alice.setVelocity(0, 0);
+
+      // таможня Кобры Орват: забирает 1–2 роутера, потом пропускает в Апофеозошную
+      if (lift && lift.guarded && this.carried > 0){
+        const tribute = Math.min(this.carried, Phaser.Math.Between(1, 2));
+        this.lastTribute = tribute;
+        this.tributeThenDump(lift.x, tribute);
+      } else {
+        this.lastTribute = 0;
+        this.toApotheosis();
+      }
+    }
+
+    // роутеры-«пошлина» летят к Кобре, затем переход
+    tributeThenDump(kobraX, n){
+      this.blipHiss();
+      const a = this.alice;
+      const title = this.add.text(this.scale.gameSize.width/2, 40,
+        "Кобра Орват берёт своё", {fontFamily:"sans-serif", fontSize:"18px", color:"#dfe8c4",
+        backgroundColor:"rgba(20,26,16,0.7)", padding:{x:10,y:6}})
+        .setOrigin(0.5).setScrollFactor(0).setDepth(45);
+      let done = 0;
+      for (let i = 0; i < n; i++){
+        const img = this.add.image(a.x + (Math.random()-0.5)*20, a.y - 60, "router")
+          .setScale(0.5).setDepth(9);
+        this.tweens.add({
+          targets: img, x: kobraX, y: this.groundY - 150, angle: 360,
+          delay: i*140, duration: 460, ease: "Quad.easeIn",
+          onComplete: () => {
+            img.destroy();
+            this.carried = Math.max(0, this.carried - 1); this.updateHUD();
+            done++;
+            if (done === n){
+              this.time.delayedCall(350, () => { title.destroy(); this.toApotheosis(); });
+            }
+          }
+        });
+      }
+    }
+
+    toApotheosis(){
       this.blipLift();
       const cam = this.cameras.main;
       cam.fadeOut(500, 0, 0, 0);
@@ -183,6 +223,18 @@
         this.scene.launch("apotheosis", { carried: this.carried });
         this.scene.pause();
       });
+    }
+
+    blipHiss(){
+      try{
+        const AC = window.AudioContext || window.webkitAudioContext; if(!AC) return;
+        if(!this._ac) this._ac = new AC(); const ac=this._ac; if(ac.state==="suspended") ac.resume();
+        const dur = 0.5, sr = ac.sampleRate, buf = ac.createBuffer(1, sr*dur, sr), d = buf.getChannelData(0);
+        for (let i=0;i<d.length;i++) d[i] = (Math.random()*2-1) * Math.pow(1 - i/d.length, 2) * 0.25; // шипение
+        const src = ac.createBufferSource(); src.buffer = buf;
+        const bp = ac.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 4500; bp.Q.value = 0.8;
+        src.connect(bp).connect(ac.destination); src.start();
+      }catch(e){}
     }
 
     onResumeAfterDump(){
@@ -338,7 +390,10 @@
       if (r() > 0.5){
         const ex = x0 + 300 + Math.floor(r()*80);
         this.drawElevator(c, ex, gY);
-        this.lifts.push({ x: ex + 60, segIndex: index });   // ew=120 → центр = ex+60
+        const cx = ex + 60;                 // ew=120 → центр = ex+60
+        const guarded = r() < 0.45;         // не у каждого лифта — таможня Кобры Орват
+        if (guarded) this.drawKobra(c, cx + 78, gY);
+        this.lifts.push({ x: cx, segIndex: index, guarded });
       }
 
       // плакаты на стене — не часто: ~50% сегментов пустые, иногда 1–2
@@ -370,6 +425,62 @@
       const num = 100 + Math.floor(r()*99);
       c.add(this.add.rectangle(x+16, y-16, 46, 14, 0xffffff, 0.9).setOrigin(0,0));
       c.add(this.add.text(x+18, y-15, "№"+num, {fontFamily:"monospace", fontSize:"11px", color:"#33424c"}).setOrigin(0,0));
+    }
+
+    // Кобра Орват — таможня у лифта: застывшее S-тело + капюшон + лицо-плейсхолдер.
+    // Выше Алисы; графика условная, в стиле тела АС.
+    drawKobra(c, x, gY){
+      const green = 0x6f8f5b, greenDk = 0x47603a;
+      const bodyH = 168, A = 26;                 // тело выше Алисы (~150)
+      const faceY = gY - bodyH - 20;
+
+      // S-тело (застывшее, не извивается) — толстая линия по синусоиде
+      const g = this.add.graphics();
+      g.lineStyle(14, green, 1);
+      g.beginPath();
+      const N = 26;
+      for (let i = 0; i <= N; i++){
+        const t = i/N;
+        const yy = gY - t*bodyH;
+        const xx = x + A*Math.sin(t*Math.PI*2);
+        if (i === 0) g.moveTo(xx, yy); else g.lineTo(xx, yy);
+      }
+      g.strokePath();
+      // брюшко (светлая тонкая линия поверх)
+      g.lineStyle(4, 0xcdd9a6, 0.5);
+      g.beginPath();
+      for (let i = 0; i <= N; i++){
+        const t = i/N; const yy = gY - t*bodyH; const xx = x + A*Math.sin(t*Math.PI*2);
+        if (i === 0) g.moveTo(xx, yy); else g.lineTo(xx, yy);
+      }
+      g.strokePath();
+      c.add(g);
+
+      // капюшон (раздутый), за лицом
+      const hood = this.add.graphics();
+      hood.fillStyle(green, 1);      hood.fillEllipse(x, faceY + 16, 96, 78);
+      hood.fillStyle(greenDk, 1);    hood.fillEllipse(x, faceY + 16, 62, 50);
+      // «очки» кобры — метка на капюшоне
+      hood.fillStyle(0xdfe8c4, 0.9);
+      hood.fillCircle(x - 12, faceY + 30, 4); hood.fillCircle(x + 12, faceY + 30, 4);
+      c.add(hood);
+
+      // лицо-плейсхолдер (блондинка — оммаж Коре Орват)
+      const f = this.add.graphics();
+      const R = 22;
+      f.fillStyle(0xd9c27a, 1); f.fillCircle(x, faceY, R + 3);            // волосы
+      f.fillStyle(COLORS.skin, 1); f.fillCircle(x, faceY + 2, R - 2);     // лицо
+      f.fillStyle(0xd9c27a, 1); f.fillEllipse(x, faceY - R + 10, R*2, 18);// чёлка
+      f.fillStyle(COLORS.ink, 1);
+      f.fillCircle(x - 8, faceY + 2, 2.6); f.fillCircle(x + 8, faceY + 2, 2.6);
+      f.lineStyle(2.4, COLORS.ink, 1);                                    // строгий ровный рот
+      f.beginPath(); f.moveTo(x - 7, faceY + 10); f.lineTo(x + 7, faceY + 10); f.strokePath();
+      // раздвоенный язычок
+      f.lineStyle(2, 0xc0392b, 1);
+      f.beginPath(); f.moveTo(x, faceY + 12); f.lineTo(x, faceY + 20); f.strokePath();
+      f.beginPath(); f.moveTo(x, faceY + 20); f.lineTo(x - 4, faceY + 24); f.strokePath();
+      f.beginPath(); f.moveTo(x, faceY + 20); f.lineTo(x + 4, faceY + 24); f.strokePath();
+      c.add(f);
     }
 
     // плакат на стене: бумага + рамка + акцентная полоса + жирный текст, лёгкий наклон
@@ -696,11 +807,13 @@
       const near = this.lifts.find(l => Math.abs(a.x - l.x) < 70);
       this.atLift = !!near && onGround && this.carried > 0 && !this._dumping;
       if (this.liftPrompt){
-        if (this.atLift) this.liftPrompt.setVisible(true).setPosition(near.x, this.groundY - 210);
-        else this.liftPrompt.setVisible(false);
+        if (this.atLift){
+          this.liftPrompt.setText(near.guarded ? "свайп ↓ — выгрузить · Кобра берёт пошлину" : "свайп ↓ — выгрузить");
+          this.liftPrompt.setVisible(true).setPosition(near.x, this.groundY - 210);
+        } else this.liftPrompt.setVisible(false);
       }
       const dumpReq = this.dumpReq; this.dumpReq = false;
-      if (dumpReq && this.atLift) this.startDump();
+      if (dumpReq && this.atLift) this.startDump(near);
 
       // лёгкое «покачивание» при ходьбе
       if (onGround && Math.abs(b.velocity.x) > 10){
