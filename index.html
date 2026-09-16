@@ -138,7 +138,12 @@
       this.builtUpTo = -SEG_W;    // до какого X застроено декором/объектами
       this.startX = 200;
       this.maxX = this.startX;    // для дистанции
-      this.score = 0;
+
+      // рюкзак (0..BAG_MAX) и кумулятивная пирамида (сохраняется)
+      this.carried = 0;
+      this.pyramid = loadPyramid();
+      this.lifts = [];            // порталы-лифты: {x, segIndex}
+      this._dumping = false;
 
       this.buildInitialWorld();
 
@@ -158,6 +163,48 @@
 
       // ресайз
       this.scale.on("resize", this.onResize, this);
+
+      // возврат из Апофеозошной (сцена возобновилась)
+      this.events.on("resume", this.onResumeAfterDump, this);
+    }
+
+    // ---------- Выгрузка в Апофеозошную ----------
+    startDump(){
+      if (this._dumping) return;
+      this._dumping = true;
+      this.liftPrompt.setVisible(false);
+      const hint = document.getElementById("hint"); if (hint) hint.classList.add("hide");
+      this.pts = {}; this.jumpReq = null; this.dumpReq = false;   // гасим ввод
+      this.alice.setVelocity(0, 0);
+      this.blipLift();
+      const cam = this.cameras.main;
+      cam.fadeOut(500, 0, 0, 0);
+      cam.once("camerafadeoutcomplete", () => {
+        this.scene.launch("apotheosis", { carried: this.carried });
+        this.scene.pause();
+      });
+    }
+
+    onResumeAfterDump(){
+      if (!this._dumping) return;
+      this._dumping = false;
+      this.carried = 0;
+      this.pyramid = loadPyramid();     // обновлено сценой апофеоза
+      this.updateHUD();
+      this.cameras.main.fadeIn(500, 0, 0, 0);
+    }
+
+    blipLift(){
+      try{
+        const AC = window.AudioContext || window.webkitAudioContext; if(!AC) return;
+        if(!this._ac) this._ac = new AC(); const ac=this._ac; if(ac.state==="suspended") ac.resume();
+        const o=ac.createOscillator(), g=ac.createGain();
+        o.type="sawtooth"; o.frequency.setValueAtTime(440, ac.currentTime);
+        o.frequency.exponentialRampToValueAtTime(90, ac.currentTime+0.5);
+        g.gain.setValueAtTime(0.06, ac.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime+0.55);
+        o.connect(g).connect(ac.destination); o.start(); o.stop(ac.currentTime+0.56);
+      }catch(e){}
     }
 
     // ---------- Текстуры (всё рисуем кодом) ----------
@@ -286,9 +333,12 @@
       if (r() > 0.5){
         this.drawDoor(c, x0 + 500 + Math.floor(r()*120), gY, r);
       }
-      // лифт (иногда)
-      if (r() > 0.55){
-        this.drawElevator(c, x0 + 300 + Math.floor(r()*80), gY);
+      // лифт-портал (иногда) — регистрируем его центр для выгрузки роутеров
+      this.lifts = (this.lifts || []).filter(l => l.segIndex !== index);
+      if (r() > 0.5){
+        const ex = x0 + 300 + Math.floor(r()*80);
+        this.drawElevator(c, ex, gY);
+        this.lifts.push({ x: ex + 60, segIndex: index });   // ew=120 → центр = ex+60
       }
 
       // плакаты на стене — не часто: ~50% сегментов пустые, иногда 1–2
@@ -463,13 +513,14 @@
       this.input.addPointer(3);       // мультитач: держать направление + флик вверх
       this.pts = {};                  // состояние по каждому указателю
       this.jumpReq = null;            // запрос прыжка от свайпа {dir}
+      this.dumpReq = false;           // запрос выгрузки (свайп вниз у лифта)
       this.walkDir = 0;               // текущее направление ходьбы (обновляется в update)
       this.SWIPE_DEAD = 20;           // дедзона по X для старта ходьбы, px
       this.FLICK_VY = -0.6;           // порог скорости вверх, px/ms
       this.FLICK_DY = 30;             // минимальный подъём от старта, px
 
       this.input.on("pointerdown", (p)=>{
-        this.pts[p.id] = { startX:p.x, startY:p.y, lastX:p.x, lastY:p.y, lastT:p.event ? p.event.timeStamp : performance.now(), jumped:false };
+        this.pts[p.id] = { startX:p.x, startY:p.y, lastX:p.x, lastY:p.y, lastT:p.event ? p.event.timeStamp : performance.now(), jumped:false, dumped:false };
       });
       this.input.on("pointermove", (p)=>{
         const s = this.pts[p.id];
@@ -485,6 +536,11 @@
           const dir = this.walkDir !== 0 ? this.walkDir
                     : (Math.abs(dx) > this.SWIPE_DEAD ? Math.sign(dx) : 0);
           this.jumpReq = { dir };
+        }
+        // флик вниз → выгрузка у лифта (один раз на жест)
+        if (!s.dumped && vy > -this.FLICK_VY && (p.y - s.startY) > this.FLICK_DY){
+          s.dumped = true;
+          this.dumpReq = true;
         }
       });
       const drop = (p)=>{ delete this.pts[p.id]; };
@@ -505,31 +561,58 @@
     }
 
     // ---------- HUD ----------
+    // Рюкзак — квадрат 4×4 из ячеек: заполняется по мере сбора, полный меняет цвет.
     buildHUD(){
-      const pad = 14;
-      this.hudBg = this.add.rectangle(10, 10, 210, 58, 0x0e1620, 0.55)
+      const x0 = 14, y0 = 14, cell = 13, gap = 3;
+      const grid = 4*cell + 3*gap;                 // ~61px
+      this.hudBg = this.add.rectangle(8, 8, grid + 150, grid + 12, 0x0e1620, 0.55)
         .setOrigin(0,0).setScrollFactor(0).setDepth(40).setStrokeStyle(1, 0xffffff, 0.12);
-      this.hudRouters = this.add.text(pad+8, 16, "", {fontFamily:"monospace", fontSize:"18px", color:"#39d98a"})
+
+      this.bagCells = [];
+      for (let i = 0; i < 16; i++){
+        const col = i % 4, row = Math.floor(i / 4);       // заполняем снизу вверх (row 3 -> низ)
+        const cx = x0 + col*(cell+gap);
+        const cy = y0 + (3-row)*(cell+gap);
+        const r = this.add.rectangle(cx, cy, cell, cell, 0x2b3a2f, 1)
+          .setOrigin(0,0).setScrollFactor(0).setDepth(41).setStrokeStyle(1, 0xffffff, 0.15);
+        this.bagCells.push(r);
+      }
+      this.hudPyramid = this.add.text(x0 + grid + 12, y0 + 4, "", {fontFamily:"monospace", fontSize:"16px", color:"#e6c14b"})
         .setScrollFactor(0).setDepth(41);
-      this.hudDist = this.add.text(pad+8, 40, "", {fontFamily:"monospace", fontSize:"14px", color:"#cfe0f5"})
+      this.hudDist = this.add.text(x0 + grid + 12, y0 + 30, "", {fontFamily:"monospace", fontSize:"13px", color:"#cfe0f5"})
         .setScrollFactor(0).setDepth(41);
+
+      // подсказка у лифта (в мире, над лифтом)
+      this.liftPrompt = this.add.text(0, 0, "свайп ↓ — выгрузить", {
+        fontFamily:"sans-serif", fontSize:"16px", color:"#ffe08a",
+        backgroundColor:"rgba(20,14,8,0.6)", padding:{x:8,y:4}
+      }).setOrigin(0.5).setDepth(8).setVisible(false);
+
       this.updateHUD();
     }
 
     updateHUD(){
-      this.hudRouters.setText("📶 Роутеры: " + this.score);
+      const full = this.carried >= 16;
+      for (let i = 0; i < 16; i++){
+        const on = i < this.carried;
+        // полный рюкзак — золотой (пора выгружать), иначе зелёный/пусто
+        this.bagCells[i].setFillStyle(on ? (full ? 0xe6c14b : 0x39d98a) : 0x2b3a2f, 1);
+      }
+      this.hudPyramid.setText("🗿 Пирамида: " + this.pyramid);
       const dist = Math.max(0, Math.floor((this.maxX - this.startX)/40));
-      this.hudDist.setText("Дистанция: " + dist + " м");
+      this.hudDist.setText("Дист: " + dist + " м · рюкзак " + this.carried + "/16");
     }
 
     // ---------- Сбор роутера ----------
     collect(alice, router){
       if (!router.active) return;
-      this.score++;
+      if (this.carried >= 16) return;   // рюкзак полон — больше не влезает, надо выгрузить
+      this.carried++;
       this.updateHUD();
       this.blip();
-      // всплеск
-      const puff = this.add.text(router.x, router.y-6, "+1", {fontFamily:"monospace", fontSize:"18px", color:"#39d98a"})
+      const full = this.carried >= 16;
+      const puff = this.add.text(router.x, router.y-6, full ? "ПОЛНО!" : "+1",
+        {fontFamily:"monospace", fontSize: full ? "16px" : "18px", color: full ? "#e6c14b" : "#39d98a"})
         .setOrigin(0.5).setDepth(9);
       this.tweens.add({ targets:puff, y:puff.y-40, alpha:0, duration:600, onComplete:()=>puff.destroy() });
       this.routerBodies.remove(router, false, false);
@@ -567,6 +650,7 @@
       this.routerBodies.clear(false, false);     // те же объекты, что и в routers — только очистить группу
       this.routers.clear(true, true);            // уничтожить спрайты роутеров
       this._populated = new Set();
+      this.lifts = [];                           // перерегистрируются в buildSegment
 
       for (const seg of this.segments) this.buildSegment(seg, seg.index);
       this.rebuildFloor();
@@ -607,6 +691,16 @@
         }
       }
       this._jumpHeld = kbdJump;
+
+      // портал-лифт: подсказка у ближайшего лифта + выгрузка по свайпу вниз
+      const near = this.lifts.find(l => Math.abs(a.x - l.x) < 70);
+      this.atLift = !!near && onGround && this.carried > 0 && !this._dumping;
+      if (this.liftPrompt){
+        if (this.atLift) this.liftPrompt.setVisible(true).setPosition(near.x, this.groundY - 210);
+        else this.liftPrompt.setVisible(false);
+      }
+      const dumpReq = this.dumpReq; this.dumpReq = false;
+      if (dumpReq && this.atLift) this.startDump();
 
       // лёгкое «покачивание» при ходьбе
       if (onGround && Math.abs(b.velocity.x) > 10){
@@ -701,6 +795,191 @@
     }
   }
 
+  // ===== Апофеозошная: пирамида роутеров а-ля «Апофеоз войны» =====
+  const PY_CAP = 18;         // максимум видимых рядов пирамиды
+  const PY_ITEM = 0.4;       // масштаб роутера в пирамиде
+  const PY_DX = 22, PY_ROW = 15;  // шаг между роутерами по X и высота ряда (с нахлёстом)
+
+  class Apotheosis extends Phaser.Scene {
+    constructor(){ super("apotheosis"); }
+
+    create(data){
+      const W = this.scale.gameSize.width, H = this.scale.gameSize.height;
+      this.carried = (data && data.carried) || 0;
+      this._returning = false;
+      this.canReturn = false;
+      this.cameras.main.fadeIn(500, 0, 0, 0);
+
+      // небо (охра→марево) и выжженная земля
+      this.add.rectangle(0, 0, W, H, 0xd9b25a).setOrigin(0,0);
+      this.add.rectangle(0, H*0.42, W, H*0.22, 0xce9c46, 0.7).setOrigin(0,0);
+      this.groundY = H - 66;
+      this.add.rectangle(0, this.groundY, W, H-this.groundY, 0xb08948).setOrigin(0,0);
+      this.add.rectangle(0, this.groundY, W, 3, 0x8a6a34).setOrigin(0,0);
+      this.add.circle(W*0.8, H*0.2, 42, 0xe8d08a, 0.65);   // тусклое солнце
+
+      this.drawRuin(28, this.groundY);
+      this.drawTree(W-64, this.groundY);
+      for (let i=0;i<5;i++) this.drawCrow(70 + Math.random()*(W-140), 50 + Math.random()*130);
+
+      // пирамида
+      this.pyBaseX = W*0.52;
+      this.pyBaseY = this.groundY - 4;
+      this.pyBefore = loadPyramid();
+      this.pyraLayer = this.add.container(0,0).setDepth(2);
+      this.drawPyramid(this.pyBefore);
+
+      // трамплин (доска) над пирамидой + АС на конце
+      const apexY = this.apexY(this.pyBefore + this.carried);
+      const boardY = apexY - 66;
+      const boardX0 = W*0.04, boardX1 = this.pyBaseX + 24;
+      this.add.rectangle(boardX0, boardY-2, 14, 44, 0x6b451f).setOrigin(0,0);           // опора
+      this.add.rectangle(boardX0, boardY, boardX1-boardX0, 12, 0x9a6633).setOrigin(0,0.5).setDepth(3); // доска
+      this.aliceX = boardX1 - 10;
+      this.alice = this.add.image(this.aliceX, boardY-2, this.textures.exists("alice") ? "alice":"router")
+        .setOrigin(0.5, 1).setDepth(3);
+
+      // подпись «в раме»
+      this.add.text(W/2, H-14, "АПОФЕОЗОШНАЯ · посвящается всем великим роутерам",
+        {fontFamily:"Georgia, 'Times New Roman', serif", fontStyle:"italic", fontSize:"12px", color:"#5a4526"})
+        .setOrigin(0.5).setDepth(5);
+      this.cnt = this.add.text(14, 12, "🗿 " + this.pyBefore, {fontFamily:"monospace", fontSize:"16px", color:"#3a2c14"})
+        .setScrollFactor(0).setDepth(5);
+
+      this.canReturn = false;
+      this.time.delayedCall(500, () => this.animateDump());
+      this.input.on("pointerdown", () => { if (this.canReturn) this.returnToCorridor(); });
+      this.input.keyboard.on("keydown", () => { if (this.canReturn) this.returnToCorridor(); });
+    }
+
+    // число полных рядов пирамиды для count элементов
+    rows(count){ return Math.max(0, Math.floor((Math.sqrt(8*count+1)-1)/2)); }
+    apexY(count){ return this.pyBaseY - Math.min(this.rows(count), PY_CAP) * PY_ROW; }
+
+    drawPyramid(count){
+      this.pyraLayer.removeAll(true);
+      const R = Math.min(this.rows(count), PY_CAP);
+      let placed = 0;
+      const full = R*(R+1)/2;
+      let extra = Math.max(0, count - full);   // остаток на неполный верхний ряд
+      // ряды снизу (широкие) вверх
+      for (let r = 0; r < R; r++){
+        const inRow = R - r;                   // низ шире
+        const y = this.pyBaseY - r*PY_ROW;
+        for (let k = 0; k < inRow; k++){
+          const x = this.pyBaseX + (k - (inRow-1)/2)*PY_DX + (Math.random()-0.5)*3;
+          this.pyraLayer.add(this.add.image(x, y, "router").setOrigin(0.5,1).setScale(PY_ITEM)
+            .setTint(0x4a4a52).setAngle((Math.random()-0.5)*30));
+          placed++;
+        }
+      }
+      // неполный верхний ряд
+      if (extra > 0 && R < PY_CAP){
+        const y = this.pyBaseY - R*PY_ROW;
+        for (let k = 0; k < Math.min(extra, R+1); k++){
+          const x = this.pyBaseX + (k - (Math.min(extra,R+1)-1)/2)*PY_DX;
+          this.pyraLayer.add(this.add.image(x, y, "router").setOrigin(0.5,1).setScale(PY_ITEM)
+            .setTint(0x55555e).setAngle((Math.random()-0.5)*30));
+        }
+      }
+    }
+
+    animateDump(){
+      const apexY = this.apexY(this.pyBefore);
+      const n = this.carried;
+      if (n === 0){ this.finishDump(); return; }
+      let landed = 0;
+      for (let i = 0; i < n; i++){
+        const img = this.add.image(this.aliceX + (Math.random()-0.5)*18, this.alice.y - 30, "router")
+          .setOrigin(0.5,1).setScale(PY_ITEM).setTint(0x4a4a52).setDepth(4);
+        const tx = this.pyBaseX + (Math.random()-0.5)*46;
+        const ty = apexY - Math.random()*8;
+        this.tweens.add({
+          targets: img, x: tx, y: ty, angle: (Math.random()-0.5)*60,
+          delay: i*70, duration: 460, ease: "Quad.easeIn",
+          onComplete: () => {
+            img.destroy();
+            landed++;
+            this.cnt.setText("🗿 " + (this.pyBefore + landed));
+            this.blipDrop();
+            if (landed === n) this.finishDump();
+          }
+        });
+      }
+    }
+
+    finishDump(){
+      const total = this.pyBefore + this.carried;
+      savePyramid(total);
+      this.drawPyramid(total);
+      this.cnt.setText("🗿 " + total);
+      const W = this.scale.gameSize.width;
+      this.add.text(W/2, this.scale.gameSize.height*0.5, "тап — назад в коридор",
+        {fontFamily:"sans-serif", fontSize:"18px", color:"#3a2c14", backgroundColor:"rgba(233,208,138,0.6)", padding:{x:10,y:6}})
+        .setOrigin(0.5).setDepth(6);
+      this.canReturn = true;
+      this.time.delayedCall(3200, () => this.returnToCorridor());
+    }
+
+    returnToCorridor(){
+      if (this._returning) return; this._returning = true;
+      this.canReturn = false;
+      this.cameras.main.fadeOut(400, 0, 0, 0);
+      this.cameras.main.once("camerafadeoutcomplete", () => {
+        this.scene.resume("corridor");
+        this.scene.stop();
+      });
+    }
+
+    // --- декор ---
+    drawRuin(x, gY){
+      const g = this.add.graphics().setDepth(1);
+      g.fillStyle(0x9c7c48, 1);
+      g.fillRect(x, gY-70, 40, 70);
+      g.fillStyle(0x8a6a3a, 1);
+      g.fillRect(x+40, gY-46, 26, 46);
+      g.fillStyle(0x7a5c30, 1);
+      for (let i=0;i<4;i++) g.fillRect(x+4+i*9, gY-78+((i%2)*6), 7, 10);   // зубцы сверху
+    }
+    drawTree(x, gY){
+      const g = this.add.graphics().setDepth(1);
+      g.lineStyle(6, 0x5a4326, 1);
+      g.beginPath(); g.moveTo(x, gY); g.lineTo(x, gY-120); g.strokePath();
+      g.lineStyle(4, 0x5a4326, 1);
+      g.beginPath(); g.moveTo(x, gY-90); g.lineTo(x+34, gY-120); g.strokePath();
+      g.beginPath(); g.moveTo(x, gY-70); g.lineTo(x-30, gY-96); g.strokePath();
+      g.beginPath(); g.moveTo(x, gY-104); g.lineTo(x-18, gY-138); g.strokePath();
+    }
+    drawCrow(x, y){
+      const g = this.add.graphics().setDepth(2);
+      g.lineStyle(2, 0x1c1c1c, 1);
+      g.beginPath(); g.moveTo(-8,0); g.lineTo(0,-5); g.lineTo(8,0); g.strokePath();
+      g.setPosition(x, y);
+      this.tweens.add({ targets:g, x:x+40, duration:2600+Math.random()*1500, yoyo:true, repeat:-1, ease:"Sine.easeInOut" });
+    }
+    blipDrop(){
+      try{
+        const AC = window.AudioContext || window.webkitAudioContext; if(!AC) return;
+        if(!this._ac) this._ac = new AC(); const ac=this._ac; if(ac.state==="suspended") ac.resume();
+        const o=ac.createOscillator(), g=ac.createGain();
+        o.type="triangle"; o.frequency.setValueAtTime(180+Math.random()*60, ac.currentTime);
+        o.frequency.exponentialRampToValueAtTime(80, ac.currentTime+0.12);
+        g.gain.setValueAtTime(0.05, ac.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime+0.14);
+        o.connect(g).connect(ac.destination); o.start(); o.stop(ac.currentTime+0.15);
+      }catch(e){}
+    }
+  }
+
+  // Кумулятивная пирамида роутеров — сохраняется между сессиями
+  const PYRAMID_KEY = "apotheosis_pyramid";
+  function loadPyramid(){
+    try{ return parseInt(localStorage.getItem(PYRAMID_KEY), 10) || 0; }catch(e){ return 0; }
+  }
+  function savePyramid(n){
+    try{ localStorage.setItem(PYRAMID_KEY, String(n)); }catch(e){}
+  }
+
   // детерминированный ГПСЧ, чтобы перестроенный коридор был стабильным
   function mulberry32(a){
     return function(){
@@ -724,7 +1003,7 @@
       default: "arcade",
       arcade: { gravity: { y: 1500 }, debug: false },
     },
-    scene: [Corridor],
+    scene: [Corridor, Apotheosis],
   };
 
   window.game = new Phaser.Game(config);
