@@ -67,6 +67,11 @@
   const SEG_W = 900;         // ширина одного сегмента коридора
   const WORLD_H = 640;       // «дизайнерская» высота сцены
 
+  // Абсурдистские плакаты на стенах (текст — как заказан, включая «СИСТРА»)
+  const POSTERS = ["БОЛЕЙТЕ!", "ПЛАН/ФАКТ", "СИФИЛИС", "СИСТРА", "RWS", "NO EXIT"];
+  const POSTER_PAPER  = [0xf2e9d0, 0xeadbb6, 0xe8d6e2, 0xd9e7da, 0xf3dad2, 0xdfe6ef];
+  const POSTER_ACCENT = [0xc0392b, 0x2f7d5b, 0x2a5f8f, 0xb8860b, 0x7d3c98, 0x2a2f36];
+
   // ===== Сцена =====
   class Corridor extends Phaser.Scene {
     constructor(){ super("corridor"); }
@@ -285,6 +290,14 @@
         this.drawElevator(c, x0 + 300 + Math.floor(r()*80), gY);
       }
 
+      // плакаты на стене (высоко, над дверями), 2 на сегмент — все шесть по кругу
+      const posterY = gY - 230;
+      for (let s = 0; s < 2; s++){
+        const text = POSTERS[((index*2 + s) % POSTERS.length + POSTERS.length) % POSTERS.length];
+        const px = x0 + 210 + s*430 + Math.floor((r()-0.5)*60);
+        this.drawPoster(c, px, posterY, text, r);
+      }
+
       seg.built = true;
 
       // объекты физики (каталки + роутеры) для этого сегмента — отдельно, тоже детерминированно
@@ -305,6 +318,34 @@
       const num = 100 + Math.floor(r()*99);
       c.add(this.add.rectangle(x+16, y-16, 46, 14, 0xffffff, 0.9).setOrigin(0,0));
       c.add(this.add.text(x+18, y-15, "№"+num, {fontFamily:"monospace", fontSize:"11px", color:"#33424c"}).setOrigin(0,0));
+    }
+
+    // плакат на стене: бумага + рамка + акцентная полоса + жирный текст, лёгкий наклон
+    drawPoster(c, cx, cy, text, r){
+      const pick = Math.floor(r()*POSTER_PAPER.length) % POSTER_PAPER.length;
+      const paper = POSTER_PAPER[pick];
+      const accent = POSTER_ACCENT[Math.floor(r()*POSTER_ACCENT.length) % POSTER_ACCENT.length];
+      const tilt = (r()-0.5) * 0.06;   // ±~1.7°
+
+      const g = this.add.container(cx, cy);
+      g.rotation = tilt;
+
+      const t = this.add.text(0, 6, text, {
+        fontFamily: "Arial, 'Helvetica Neue', sans-serif",
+        fontStyle: "bold", fontSize: "28px", color: "#22282e",
+        align: "center"
+      }).setOrigin(0.5);
+
+      const padX = 20, padY = 16;
+      const w = Math.ceil(t.width) + padX*2;
+      const h = Math.ceil(t.height) + padY*2;
+
+      const frame = this.add.rectangle(0, 0, w+8, h+8, 0x2a2f36, 0.85).setOrigin(0.5);
+      const sheet = this.add.rectangle(0, 0, w, h, paper, 1).setOrigin(0.5).setStrokeStyle(2, 0x2a2f36, 0.5);
+      const bar   = this.add.rectangle(0, -h/2 + 6, w, 8, accent, 1).setOrigin(0.5); // акцентная полоса сверху
+
+      g.add([frame, sheet, bar, t]);
+      c.add(g);
     }
 
     drawElevator(c, x, gY){
