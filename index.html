@@ -533,8 +533,10 @@
       const right = this.touch.right || this.keys.right.isDown || this.keys.d.isDown;
       const jumpBtn = this.touch.jump || this.keys.up.isDown || this.keys.w.isDown || this.keys.space.isDown;
 
-      if (left && !right){ a.setVelocityX(-speed); a.setFlipX(true); this.facing = -1; }
-      else if (right && !left){ a.setVelocityX(speed); a.setFlipX(false); this.facing = 1; }
+      // Голова (assets/head.png) нарисована смотрящей ВЛЕВО, поэтому влево — без флипа,
+      // вправо — зеркалим (весь спрайт, голова смотрит по ходу движения).
+      if (left && !right){ a.setVelocityX(-speed); a.setFlipX(false); this.facing = -1; }
+      else if (right && !left){ a.setVelocityX(speed); a.setFlipX(true); this.facing = 1; }
       else { a.setVelocityX(0); }
 
       if (jumpBtn && onGround && !this._jumpHeld){ a.setVelocityY(-jump); this.blipJump(); }
