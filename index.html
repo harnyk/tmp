@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Алиса и роутеры</title>
+<meta name="description" content="Мобильный веб-платформер: Алиса Селезнёва идёт по бесконечному больничному коридору и собирает Wi-Fi роутеры.">
+<style>
+  :root{
+    --bg:#0e1116;
+    --hud:#e8f1ff;
+  }
+  *{ box-sizing:border-box; }
+  html,body{
+    margin:0; padding:0; height:100%; width:100%;
+    background:var(--bg); overflow:hidden;
+    -webkit-tap-highlight-color:transparent;
+    -webkit-user-select:none; user-select:none;
+    touch-action:none;
+    overscroll-behavior:none;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  #game{ position:fixed; inset:0; }
+  /* маленькая подсказка на первом экране, гасится по первому касанию */
+  #hint{
+    position:fixed; left:50%; bottom:14px; transform:translateX(-50%);
+    color:#9fb2cc; font-size:13px; letter-spacing:.2px;
+    background:rgba(10,14,20,.55); padding:6px 12px; border-radius:999px;
+    pointer-events:none; transition:opacity .4s ease; z-index:5;
+  }
+  #hint.hide{ opacity:0; }
+</style>
+</head>
+<body>
+  <div id="game"></div>
+  <div id="hint">← → ходить · вверх — прыжок · собирай роутеры</div>
+
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+  <script>
+  "use strict";
+
+  // ===== Палитра больничного коридора =====
+  const COLORS = {
+    wallTop:    0xdfe7ea,   // верх стены
+    wallBottom: 0xcdd7db,   // низ стены
+    bumper:     0x2f7d5b,   // зелёная полоса-отбойник (чтобы каталками не царапать)
+    bumperEdge: 0x1f5a40,
+    floor:      0xb9b0a2,   // линолеум
+    floorLine:  0x9a9184,
+    ceiling:    0xe9eef0,
+    lightOn:    0xfff6cf,
+    door:       0xb7c4cf,
+    doorDark:   0x7f8f9c,
+    elevator:   0x8892a0,
+    gurney:     0xeef3f6,
+    gurneyPad:  0x5a86c9,
+    steel:      0xc7cfd6,
+    skin:       0xf3c9a3,
+    hair:       0x6b4a34,
+    ink:        0x22303a,
+    router:     0x2a2f36,
+    routerLed:  0x39d98a,
+    wifi:       0x39d98a,
+  };
+
+  const GROUND_H = 90;       // высота пола от низа
+  const SEG_W = 900;         // ширина одного сегмента коридора
+  const WORLD_H = 640;       // «дизайнерская» высота сцены
+
+  // ===== Сцена =====
+  class Corridor extends Phaser.Scene {
+    constructor(){ super("corridor"); }
+
+    preload(){
+      // Слот для «прифотошопленной» головы АС.
+      // Положи прозрачный PNG в assets/head.png — он подставится вместо плейсхолдера.
+      this.headLoaded = false;
+      this.load.image("head", "assets/head.png");
+      this.load.on("loaderror", (file) => {
+        if (file && file.key === "head") this.headLoaded = false;
+      });
+      this.load.on("filecomplete-image-head", () => { this.headLoaded = true; });
+    }
+
+    create(){
+      const H = this.scale.gameSize.height;
+      this.groundY = H - GROUND_H;
+
+      // цвет-«рамки» под нижние поля телефонов
+      this.cameras.main.setBackgroundColor("#0e1116");
+
+      this.makeTextures();
+
+      // бесконечный мир по X
+      this.physics.world.setBounds(-Infinity, 0, Infinity, H);
+
+      // --- фон-коридор: пул сегментов, переиспользуется ---
+      this.bgLayer = this.add.container(0, 0).setDepth(0);
+      this.segments = [];         // {container, x}
+      this.segCount = 5;
+      for (let i = 0; i < this.segCount; i++){
+        const c = this.add.container(0, 0);
+        this.bgLayer.add(c);
+        this.segments.push({ container: c, index: i - 1, built: false });
+      }
+
+      // --- каталки (препятствия) ---
+      this.gurneys = this.physics.add.staticGroup();
+      // --- роутеры (коллектиблы) ---
+      this.routers = this.add.group();
+      this.routerBodies = this.physics.add.group({ allowGravity:false, immovable:true });
+
+      // --- пол (невидимая коллизия во всю длину, двигаем за игроком) ---
+      this.floorBody = this.add.rectangle(0, this.groundY + GROUND_H/2, SEG_W*this.segCount, GROUND_H, 0x000000, 0);
+      this.physics.add.existing(this.floorBody, true);
+
+      // --- Алиса ---
+      this.alice = this.physics.add.sprite(200, this.groundY - 80, "alice");
+      this.alice.setOrigin(0.5, 1);
+      this.alice.body.setSize(46, 118).setOffset(this.alice.width/2 - 23, this.alice.height - 118);
+      this.alice.setCollideWorldBounds(false);
+      this.alice.setDepth(6);
+
+      this.physics.add.collider(this.alice, this.floorBody);
+      this.physics.add.collider(this.alice, this.gurneys);
+      this.physics.add.overlap(this.alice, this.routerBodies, this.collect, null, this);
+
+      // камера следит только по горизонтали; пол всегда прижат к низу экрана
+      // (см. смещение scrollX в update)
+
+      // world-строитель
+      this.builtUpTo = -SEG_W;    // до какого X застроено декором/объектами
+      this.startX = 200;
+      this.maxX = this.startX;    // для дистанции
+      this.score = 0;
+
+      this.buildInitialWorld();
+
+      // ---- ввод ----
+      this.setupInput();
+
+      // ---- HUD ----
+      this.buildHUD();
+
+      // gentle: спрятать подсказку по первому вводу
+      this._hideHint = () => {
+        const h = document.getElementById("hint");
+        if (h) h.classList.add("hide");
+        this.input.off("pointerdown", this._hideHint);
+      };
+      this.input.on("pointerdown", this._hideHint);
+
+      // ресайз
+      this.scale.on("resize", this.onResize, this);
+    }
+
+    // ---------- Текстуры (всё рисуем кодом) ----------
+    makeTextures(){
+      this.makeAliceTexture();
+      this.makeRouterTexture();
+    }
+
+    makeAliceTexture(){
+      // человечек из линий + голова (плейсхолдер, либо assets/head.png если положили)
+      const w = 92, h = 150;
+      const cx = w/2;
+      const headR = 24, headCy = 30;
+      const shoulderY = headCy + headR + 12;
+      const hipY = h - 46;
+
+      // --- тело из линий (без головы) ---
+      const g = this.add.graphics();
+      g.lineStyle(6, COLORS.ink, 1);
+      g.beginPath(); g.moveTo(cx, headCy + headR - 2); g.lineTo(cx, headCy + headR + 10); g.strokePath();      // шея
+      g.beginPath(); g.moveTo(cx, shoulderY); g.lineTo(cx, hipY); g.strokePath();                               // позвоночник
+      g.beginPath(); g.moveTo(cx, shoulderY + 6); g.lineTo(cx - 26, shoulderY + 34); g.strokePath();            // руки
+      g.beginPath(); g.moveTo(cx, shoulderY + 6); g.lineTo(cx + 26, shoulderY + 30); g.strokePath();
+      g.beginPath(); g.moveTo(cx, hipY); g.lineTo(cx - 20, h - 4); g.strokePath();                              // ноги
+      g.beginPath(); g.moveTo(cx, hipY); g.lineTo(cx + 20, h - 4); g.strokePath();
+
+      if (this.headLoaded){
+        // тело в отдельную текстуру, затем поверх — картинку головы через RenderTexture
+        g.generateTexture("alice_body", w, h);
+        g.destroy();
+        const src = this.textures.get("head").getSourceImage();
+        const targetD = headR * 2.6;
+        const scale = targetD / Math.max(src.width, src.height);
+        const headImg = this.add.image(cx, headCy, "head").setOrigin(0.5).setScale(scale).setVisible(false);
+        const rt = this.make.renderTexture({ width:w, height:h }, false);
+        rt.draw("alice_body", 0, 0);
+        rt.draw(headImg, cx, headCy);
+        rt.saveTexture("alice");
+        headImg.destroy();
+      } else {
+        // голова-плейсхолдер: кружок-каре с лицом
+        g.fillStyle(COLORS.hair, 1);   g.fillCircle(cx, headCy, headR + 3);
+        g.fillStyle(COLORS.skin, 1);   g.fillCircle(cx, headCy + 2, headR - 2);
+        g.fillStyle(COLORS.hair, 1);   g.fillEllipse(cx, headCy - headR + 10, headR*2, 20);
+        g.fillStyle(COLORS.ink, 1);
+        g.fillCircle(cx - 8, headCy + 2, 2.6);
+        g.fillCircle(cx + 8, headCy + 2, 2.6);
+        g.lineStyle(2.4, COLORS.ink, 1);
+        g.beginPath(); g.arc(cx, headCy + 6, 8, 0.15*Math.PI, 0.85*Math.PI, false); g.strokePath();
+        g.generateTexture("alice", w, h);
+        g.destroy();
+      }
+    }
+
+    makeRouterTexture(){
+      const w = 66, h = 54;
+      const g = this.add.graphics();
+      // «волны» wi-fi
+      g.lineStyle(3, COLORS.wifi, 0.9);
+      for (let i = 1; i <= 3; i++){
+        g.beginPath();
+        g.arc(w/2, h - 12, 8 + i*7, 1.15*Math.PI, 1.85*Math.PI, false);
+        g.strokePath();
+      }
+      // корпус
+      g.fillStyle(COLORS.router, 1);
+      g.fillRoundedRect(10, h - 22, w - 20, 16, 4);
+      // антенны
+      g.lineStyle(4, COLORS.router, 1);
+      g.beginPath(); g.moveTo(20, h - 22); g.lineTo(12, h - 40); g.strokePath();
+      g.beginPath(); g.moveTo(w - 20, h - 22); g.lineTo(w - 12, h - 40); g.strokePath();
+      // LED
+      g.fillStyle(COLORS.routerLed, 1);
+      g.fillCircle(w/2, h - 14, 3);
+      g.generateTexture("router", w, h);
+      g.destroy();
+    }
+
+    // ---------- Построение мира ----------
+    buildInitialWorld(){
+      for (let i = 0; i < this.segments.length; i++){
+        this.buildSegment(this.segments[i], i - 1);
+      }
+      this.rebuildFloor();
+    }
+
+    // индекс сегмента -> его левый X
+    segLeftX(index){ return index * SEG_W; }
+
+    buildSegment(seg, index){
+      const c = seg.container;
+      c.removeAll(true);
+      seg.index = index;
+      const x0 = this.segLeftX(index);
+      const H = this.scale.gameSize.height;
+      const gY = this.groundY;
+
+      // задняя стена (градиент двумя прямоугольниками)
+      c.add(this.add.rectangle(x0, 0, SEG_W, gY*0.55, COLORS.wallTop).setOrigin(0,0));
+      c.add(this.add.rectangle(x0, gY*0.55, SEG_W, gY*0.45, COLORS.wallBottom).setOrigin(0,0));
+
+      // потолок + лампы
+      c.add(this.add.rectangle(x0, 0, SEG_W, 26, COLORS.ceiling).setOrigin(0,0));
+      for (let lx = 120; lx < SEG_W; lx += 260){
+        c.add(this.add.rectangle(x0 + lx, 8, 90, 12, COLORS.lightOn).setOrigin(0,0));
+      }
+
+      // полоса-отбойник на стене (горизонтальная), «чтобы каталками не поцарапать»
+      const bumperY = gY - 70;
+      c.add(this.add.rectangle(x0, bumperY, SEG_W, 16, COLORS.bumper).setOrigin(0,0));
+      c.add(this.add.rectangle(x0, bumperY, SEG_W, 3, COLORS.bumperEdge).setOrigin(0,0));
+      c.add(this.add.rectangle(x0, bumperY + 13, SEG_W, 3, COLORS.bumperEdge).setOrigin(0,0));
+
+      // пол (линолеум) + стыки плит
+      c.add(this.add.rectangle(x0, gY, SEG_W, GROUND_H, COLORS.floor).setOrigin(0,0));
+      for (let fx = 0; fx <= SEG_W; fx += 120){
+        c.add(this.add.rectangle(x0 + fx, gY, 2, GROUND_H, COLORS.floorLine).setOrigin(0,0));
+      }
+      c.add(this.add.rectangle(x0, gY, SEG_W, 3, 0xffffff, 0.25).setOrigin(0,0));
+
+      // Двери и лифты — детерминированно от индекса, чтобы при перестройке было стабильно
+      const r = mulberry32(1000 + index*97 + 7);
+      // дверь(и)
+      const doorX = x0 + 120 + Math.floor(r()*120);
+      this.drawDoor(c, doorX, gY, r);
+      if (r() > 0.5){
+        this.drawDoor(c, x0 + 500 + Math.floor(r()*120), gY, r);
+      }
+      // лифт (иногда)
+      if (r() > 0.55){
+        this.drawElevator(c, x0 + 300 + Math.floor(r()*80), gY);
+      }
+
+      seg.built = true;
+
+      // объекты физики (каталки + роутеры) для этого сегмента — отдельно, тоже детерминированно
+      this.populateSegment(index);
+    }
+
+    drawDoor(c, x, gY, r){
+      const dw = 78, dh = 150;
+      const y = gY - dh;
+      c.add(this.add.rectangle(x-4, y-4, dw+8, dh+4, COLORS.doorDark).setOrigin(0,0));
+      c.add(this.add.rectangle(x, y, dw, dh, COLORS.door).setOrigin(0,0));
+      // филёнки
+      c.add(this.add.rectangle(x+10, y+12, dw-20, dh*0.5, 0xffffff, 0.18).setOrigin(0,0));
+      c.add(this.add.rectangle(x+10, y+12+dh*0.5+6, dw-20, dh*0.35, 0xffffff, 0.12).setOrigin(0,0));
+      // ручка
+      c.add(this.add.rectangle(x+dw-14, y+dh*0.55, 6, 20, COLORS.doorDark).setOrigin(0,0));
+      // табличка «Кабинет N»
+      const num = 100 + Math.floor(r()*99);
+      c.add(this.add.rectangle(x+16, y-16, 46, 14, 0xffffff, 0.9).setOrigin(0,0));
+      c.add(this.add.text(x+18, y-15, "№"+num, {fontFamily:"monospace", fontSize:"11px", color:"#33424c"}).setOrigin(0,0));
+    }
+
+    drawElevator(c, x, gY){
+      const ew = 120, eh = 190;
+      const y = gY - eh;
+      c.add(this.add.rectangle(x-6, y-6, ew+12, eh+6, 0x5b6673).setOrigin(0,0));
+      c.add(this.add.rectangle(x, y, ew/2-1, eh, COLORS.elevator).setOrigin(0,0));
+      c.add(this.add.rectangle(x+ew/2+1, y, ew/2-1, eh, COLORS.elevator).setOrigin(0,0));
+      c.add(this.add.rectangle(x+ew/2-1, y, 2, eh, 0x3d4650).setOrigin(0,0));
+      // индикатор этажа
+      c.add(this.add.rectangle(x+ew/2-18, y-22, 36, 16, 0x20272e).setOrigin(0,0));
+      c.add(this.add.text(x+ew/2-10, y-21, "▲", {fontFamily:"monospace", fontSize:"12px", color:"#ffcf5a"}).setOrigin(0,0));
+      // кнопка вызова
+      c.add(this.add.circle(x+ew+12, y+eh*0.5, 6, 0x2a2f36).setOrigin(0.5));
+      c.add(this.add.circle(x+ew+12, y+eh*0.5, 3, 0x39d98a).setOrigin(0.5));
+    }
+
+    // Каталки и роутеры сегмента — создаём один раз на индекс, помечаем segIndex
+    populateSegment(index){
+      if (!this._populated) this._populated = new Set();
+      if (this._populated.has(index)) return;
+      this._populated.add(index);
+
+      const x0 = this.segLeftX(index);
+      const gY = this.groundY;
+      const r = mulberry32(555 + index*131 + 3);
+
+      // не заваливаем стартовый экран препятствиями
+      const isStart = (index === 0);
+
+      // 1–2 каталки
+      const nG = isStart ? 1 : (1 + (r() > 0.6 ? 1 : 0));
+      for (let i = 0; i < nG; i++){
+        const gx = x0 + 220 + i*430 + Math.floor(r()*120);
+        this.spawnGurney(gx, gY, index);
+        // роутер на каталке
+        if (r() > 0.35) this.spawnRouter(gx, gY - 118, index);
+      }
+      // парящие роутеры — на достижимой прыжком высоте (апекс прыжка ~110px)
+      const nR = 2 + Math.floor(r()*2);
+      for (let i = 0; i < nR; i++){
+        const rx = x0 + 120 + i*(SEG_W/(nR+1)) + Math.floor(r()*60);
+        const ry = gY - 70 - Math.floor(r()*120);   // gY-70 .. gY-190
+        this.spawnRouter(rx, ry, index);
+      }
+    }
+
+    spawnGurney(x, gY, segIndex){
+      const w = 150, h = 74;
+      const y = gY - h;
+      const g = this.add.container(x, y).setDepth(4);
+      g.add(this.add.rectangle(0, 18, w, 20, COLORS.gurneyPad).setOrigin(0,0));        // матрас
+      g.add(this.add.rectangle(0, 14, w, 6, 0xffffff, 0.7).setOrigin(0,0));            // простыня
+      g.add(this.add.rectangle(0, 34, w, 8, COLORS.steel).setOrigin(0,0));             // рама
+      g.add(this.add.rectangle(4, 4, 34, 14, 0xffffff, 0.85).setOrigin(0,0));          // подушка
+      g.add(this.add.rectangle(6, 42, 6, 26, COLORS.steel).setOrigin(0,0));            // ножки
+      g.add(this.add.rectangle(w-12, 42, 6, 26, COLORS.steel).setOrigin(0,0));
+      g.add(this.add.circle(9, 70, 7, 0x2a2f36));                                      // колёса
+      g.add(this.add.circle(w-9, 70, 7, 0x2a2f36));
+      // ограждение
+      g.add(this.add.rectangle(0, 6, 4, 30, COLORS.steel).setOrigin(0,0));
+      g.add(this.add.rectangle(w-4, 6, 4, 30, COLORS.steel).setOrigin(0,0));
+
+      // физ-тело каталки (перепрыгиваемое препятствие)
+      const body = this.add.rectangle(x + w/2, y + h/2 + 12, w-16, h-24, 0x000000, 0);
+      this.gurneys.add(body);
+      body.segIndex = segIndex;
+      body.gfx = g;
+      g.body = body;
+    }
+
+    spawnRouter(x, y, segIndex){
+      const img = this.add.image(x, y, "router").setDepth(5);
+      this.physics.add.existing(img);
+      img.body.setAllowGravity(false);
+      img.body.setImmovable(true);
+      img.segIndex = segIndex;
+      img.baseY = y;
+      img.phase = Math.random()*Math.PI*2;
+      this.routers.add(img);
+      this.routerBodies.add(img);
+    }
+
+    rebuildFloor(){
+      // держим коллайдер пола под текущим окном сегментов
+      const minIndex = Math.min(...this.segments.map(s=>s.index));
+      const leftX = this.segLeftX(minIndex);
+      const totalW = SEG_W * this.segments.length;
+      this.floorBody.x = leftX + totalW/2;
+      this.floorBody.y = this.groundY + GROUND_H/2;
+      this.floorBody.body.updateFromGameObject();
+    }
+
+    // ---------- Ввод ----------
+    setupInput(){
+      this.keys = this.input.keyboard.addKeys({
+        left: Phaser.Input.Keyboard.KeyCodes.LEFT,
+        right: Phaser.Input.Keyboard.KeyCodes.RIGHT,
+        a: Phaser.Input.Keyboard.KeyCodes.A,
+        d: Phaser.Input.Keyboard.KeyCodes.D,
+        up: Phaser.Input.Keyboard.KeyCodes.UP,
+        w: Phaser.Input.Keyboard.KeyCodes.W,
+        space: Phaser.Input.Keyboard.KeyCodes.SPACE,
+      });
+      this.touch = { left:false, right:false, jump:false };
+      this.buildTouchButtons();
+    }
+
+    buildTouchButtons(){
+      const H = this.scale.gameSize.height, W = this.scale.gameSize.width;
+      const depth = 50;
+      const mk = (x, y, r, label) => {
+        const g = this.add.container(x, y).setScrollFactor(0).setDepth(depth);
+        const circ = this.add.circle(0, 0, r, 0x1a2431, 0.45).setStrokeStyle(2, 0xffffff, 0.25);
+        const txt = this.add.text(0, 0, label, {fontFamily:"sans-serif", fontSize:(r*0.9)+"px", color:"#e8f1ff"}).setOrigin(0.5);
+        g.add([circ, txt]);
+        g.setSize(r*2, r*2);
+        g.circR = r;
+        return g;
+      };
+      this.btnLeft  = mk(70, H-80, 42, "‹");
+      this.btnRight = mk(174, H-80, 42, "›");
+      this.btnJump  = mk(W-80, H-90, 50, "▲");
+
+      const bind = (btn, keyName) => {
+        btn.setInteractive(new Phaser.Geom.Circle(0,0,btn.circR), Phaser.Geom.Circle.Contains);
+        btn.on("pointerdown", ()=>{ this.touch[keyName]=true; btn.first.setFillStyle(0x2e4763,0.6); });
+        const off = ()=>{ this.touch[keyName]=false; btn.first.setFillStyle(0x1a2431,0.45); };
+        btn.on("pointerup", off);
+        btn.on("pointerout", off);
+      };
+      bind(this.btnLeft, "left");
+      bind(this.btnRight, "right");
+      bind(this.btnJump, "jump");
+
+      this.input.addPointer(3); // мультитач: ходьба + прыжок одновременно
+    }
+
+    repositionButtons(){
+      if (!this.btnLeft) return;
+      const H = this.scale.gameSize.height, W = this.scale.gameSize.width;
+      this.btnLeft.setPosition(70, H-80);
+      this.btnRight.setPosition(174, H-80);
+      this.btnJump.setPosition(W-80, H-90);
+    }
+
+    // ---------- HUD ----------
+    buildHUD(){
+      const pad = 14;
+      this.hudBg = this.add.rectangle(10, 10, 210, 58, 0x0e1620, 0.55)
+        .setOrigin(0,0).setScrollFactor(0).setDepth(40).setStrokeStyle(1, 0xffffff, 0.12);
+      this.hudRouters = this.add.text(pad+8, 16, "", {fontFamily:"monospace", fontSize:"18px", color:"#39d98a"})
+        .setScrollFactor(0).setDepth(41);
+      this.hudDist = this.add.text(pad+8, 40, "", {fontFamily:"monospace", fontSize:"14px", color:"#cfe0f5"})
+        .setScrollFactor(0).setDepth(41);
+      this.updateHUD();
+    }
+
+    updateHUD(){
+      this.hudRouters.setText("📶 Роутеры: " + this.score);
+      const dist = Math.max(0, Math.floor((this.maxX - this.startX)/40));
+      this.hudDist.setText("Дистанция: " + dist + " м");
+    }
+
+    // ---------- Сбор роутера ----------
+    collect(alice, router){
+      if (!router.active) return;
+      this.score++;
+      this.updateHUD();
+      this.blip();
+      // всплеск
+      const puff = this.add.text(router.x, router.y-6, "+1", {fontFamily:"monospace", fontSize:"18px", color:"#39d98a"})
+        .setOrigin(0.5).setDepth(9);
+      this.tweens.add({ targets:puff, y:puff.y-40, alpha:0, duration:600, onComplete:()=>puff.destroy() });
+      this.routerBodies.remove(router, false, false);
+      this.routers.remove(router, false, false);
+      router.destroy();
+    }
+
+    blip(){
+      try{
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        if (!this._ac) this._ac = new AC();
+        const ac = this._ac;
+        if (ac.state === "suspended") ac.resume();
+        const o = ac.createOscillator(), gv = ac.createGain();
+        o.type = "square";
+        o.frequency.setValueAtTime(660, ac.currentTime);
+        o.frequency.exponentialRampToValueAtTime(1180, ac.currentTime+0.08);
+        gv.gain.setValueAtTime(0.09, ac.currentTime);
+        gv.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime+0.14);
+        o.connect(gv).connect(ac.destination);
+        o.start(); o.stop(ac.currentTime+0.15);
+      }catch(e){}
+    }
+
+    // ---------- Ресайз / поворот экрана ----------
+    onResize(){
+      if (!this.segments || !this.alice) return;
+      const H = this.scale.gameSize.height;
+      this.groundY = H - GROUND_H;
+
+      // сносим динамические объекты и пересобираем сегменты под новую высоту
+      this.gurneys.children.iterate((body)=>{ if (body && body.gfx) body.gfx.destroy(); });
+      this.gurneys.clear(true, true);            // тела каталок
+      this.routerBodies.clear(false, false);     // те же объекты, что и в routers — только очистить группу
+      this.routers.clear(true, true);            // уничтожить спрайты роутеров
+      this._populated = new Set();
+
+      for (const seg of this.segments) this.buildSegment(seg, seg.index);
+      this.rebuildFloor();
+      this.repositionButtons();
+
+      // если Алиса оказалась ниже нового пола — поднимем на пол
+      if (this.alice.y > this.groundY){ this.alice.y = this.groundY - 5; this.alice.setVelocityY(0); }
+    }
+
+    // ---------- Игровой цикл ----------
+    update(time, delta){
+      const a = this.alice, b = a.body;
+      const speed = 260, jump = 560;
+      const onGround = b.blocked.down || b.touching.down;
+
+      const left = this.touch.left || this.keys.left.isDown || this.keys.a.isDown;
+      const right = this.touch.right || this.keys.right.isDown || this.keys.d.isDown;
+      const jumpBtn = this.touch.jump || this.keys.up.isDown || this.keys.w.isDown || this.keys.space.isDown;
+
+      if (left && !right){ a.setVelocityX(-speed); a.setFlipX(true); this.facing = -1; }
+      else if (right && !left){ a.setVelocityX(speed); a.setFlipX(false); this.facing = 1; }
+      else { a.setVelocityX(0); }
+
+      if (jumpBtn && onGround && !this._jumpHeld){ a.setVelocityY(-jump); this.blipJump(); }
+      this._jumpHeld = jumpBtn;
+
+      // лёгкое «покачивание» при ходьбе
+      if (onGround && Math.abs(b.velocity.x) > 10){
+        a.rotation = Math.sin(time*0.02) * 0.05;
+      } else {
+        a.rotation = Phaser.Math.Linear(a.rotation, 0, 0.2);
+      }
+
+      // не даём провалиться если что-то пошло не так
+      if (a.y > this.scale.gameSize.height + 400){
+        a.setPosition(this.maxX, this.groundY - 120);
+        a.setVelocity(0,0);
+      }
+
+      // камера: плавно по X, пол прижат к низу (scrollY=0)
+      const cam = this.cameras.main;
+      const targetX = a.x - this.scale.gameSize.width * 0.4;
+      cam.scrollX = Phaser.Math.Linear(cam.scrollX, targetX, 0.12);
+      cam.scrollY = 0;
+
+      this.maxX = Math.max(this.maxX, a.x);
+      this.updateHUD();
+
+      // покачивание роутеров
+      this.routers.children.iterate((r)=>{
+        if (r && r.active){ r.y = r.baseY + Math.sin(time*0.004 + r.phase)*6; r.body.updateFromGameObject && r.body.updateFromGameObject(); r.rotation = Math.sin(time*0.003 + r.phase)*0.15; }
+      });
+
+      this.recycleWorld();
+    }
+
+    blipJump(){
+      try{
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        if (!this._ac) this._ac = new AC();
+        const ac = this._ac; if (ac.state==="suspended") ac.resume();
+        const o = ac.createOscillator(), gv = ac.createGain();
+        o.type="triangle"; o.frequency.setValueAtTime(320, ac.currentTime);
+        o.frequency.exponentialRampToValueAtTime(520, ac.currentTime+0.12);
+        gv.gain.setValueAtTime(0.05, ac.currentTime);
+        gv.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime+0.16);
+        o.connect(gv).connect(ac.destination); o.start(); o.stop(ac.currentTime+0.17);
+      }catch(e){}
+    }
+
+    // переиспользование фоновых сегментов + подгрузка объектов
+    recycleWorld(){
+      const camX = this.cameras.main.scrollX;
+      const viewW = this.scale.gameSize.width;
+
+      // индекс сегмента, в котором сейчас центр вида
+      const centerIdx = Math.floor((camX + viewW/2) / SEG_W);
+
+      // хотим сегменты [centerIdx-2 .. centerIdx+2]
+      const want = [];
+      for (let d=-2; d<=2; d++) want.push(centerIdx + d);
+
+      const have = this.segments.map(s=>s.index);
+      // переназначаем те, что вне окна
+      for (const seg of this.segments){
+        if (!want.includes(seg.index)){
+          // найти нужный индекс, которого ещё нет
+          const missing = want.find(i => !this.segments.some(s=>s.index===i));
+          if (missing !== undefined){
+            this.buildSegment(seg, missing);
+          }
+        }
+      }
+      this.rebuildFloor();
+
+      // подчистка объектов далеко за кадром (каталки/роутеры) — удаляем по segIndex вне окна
+      const keepMin = centerIdx - 3, keepMax = centerIdx + 3;
+      this.gurneys.children.iterate((body)=>{
+        if (body && (body.segIndex < keepMin || body.segIndex > keepMax)){
+          if (body.gfx) body.gfx.destroy();
+          this.gurneys.remove(body, true, true);
+          this._populated.delete(body.segIndex);
+        }
+      });
+      this.routers.children.iterate((r)=>{
+        if (r && (r.segIndex < keepMin || r.segIndex > keepMax)){
+          this.routerBodies.remove(r, false, false);
+          this.routers.remove(r, false, false);
+          r.destroy();
+        }
+      });
+      // если сегмент был очищен от объектов, но снова в окне — заселить заново
+      for (const idx of want){
+        if (idx >= keepMin && idx <= keepMax) this.populateSegment(idx);
+      }
+    }
+  }
+
+  // детерминированный ГПСЧ, чтобы перестроенный коридор был стабильным
+  function mulberry32(a){
+    return function(){
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      let t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  const config = {
+    type: Phaser.AUTO,
+    parent: "game",
+    backgroundColor: "#0e1116",
+    scale: {
+      mode: Phaser.Scale.RESIZE,   // канвас на весь экран телефона (портрет/ландшафт)
+      width: "100%",
+      height: "100%",
+    },
+    physics: {
+      default: "arcade",
+      arcade: { gravity: { y: 1500 }, debug: false },
+    },
+    scene: [Corridor],
+  };
+
+  window.game = new Phaser.Game(config);
+  </script>
+</body>
+</html>
