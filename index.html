@@ -320,6 +320,8 @@
     swapToKobra(lift){
       if (this.playingAs === "kobra") return;
       this.playingAs = "kobra";
+      // прячем настенную Кобру этого лифта (она «стала» игроком) — чинит дубль
+      if (lift.kobraGfx) lift.kobraGfx.setVisible(false);
       // АС остаётся привратницей у этого лифта
       if (this.gatekeeper) this.gatekeeper.destroy();
       this.gatekeeper = this.add.image(lift.x, this.groundY, "alice").setOrigin(0.5, 1).setDepth(6);
@@ -331,7 +333,6 @@
       a.setFlipX(false);
       this.setHell(true);
       this.blipLift();
-      this.flashTitle("ЗЛОЙ БЛИЗНЕЦ ЗАБРАЛ ТВОЮ ЖИЗНЬ", "#ff5a5a");
     }
 
     swapToAlice(){
@@ -339,17 +340,10 @@
       if (this.gatekeeper){ this.gatekeeper.destroy(); this.gatekeeper = null; }
       const a = this.alice;
       a.setTexture("alice");
+      a.setScale(1, 1);
       a.body.setSize(46, 118).setOffset(a.width/2 - 23, a.height - 118);
       this.carried = 0; this.updateHUD();
       this.setHell(false);
-    }
-
-    flashTitle(text, color){
-      const t = this.add.text(this.scale.gameSize.width/2, this.scale.gameSize.height*0.35, text,
-        {fontFamily:"sans-serif", fontStyle:"bold", fontSize:"20px", color:color||"#fff", align:"center",
-         backgroundColor:"rgba(0,0,0,0.6)", padding:{x:12,y:8}})
-        .setOrigin(0.5).setScrollFactor(0).setDepth(46);
-      this.tweens.add({ targets:t, alpha:0, delay:1400, duration:800, onComplete:()=>t.destroy() });
     }
 
     blipLift(){
@@ -541,8 +535,9 @@
         this.drawElevator(c, ex, gY);
         const cx = ex + 60;                 // ew=120 → центр = ex+60
         const guarded = r() < 0.45;         // не у каждого лифта — таможня Кобры Орват
-        if (guarded) this.drawKobra(c, cx + 78, gY);
-        this.lifts.push({ x: cx, segIndex: index, guarded });
+        const liftEntry = { x: cx, segIndex: index, guarded };
+        if (guarded) liftEntry.kobraGfx = this.drawKobra(c, cx + 78, gY);
+        this.lifts.push(liftEntry);
       }
 
       // плакаты на стене — не часто: ~50% сегментов пустые, иногда 1–2
@@ -576,67 +571,52 @@
       c.add(this.add.text(x+18, y-15, "№"+num, {fontFamily:"monospace", fontSize:"11px", color:"#33424c"}).setOrigin(0,0));
     }
 
-    // Кобра Орват — таможня у лифта: застывшее S-тело + капюшон + лицо-плейсхолдер.
-    // Выше Алисы; графика условная, в стиле тела АС.
+    // Кобра Орват — таможня у лифта: застывшее S-тело + капюшон + лицо.
+    // Рисуем в контейнере с якорем у пола (x, gY) — чтобы «дышала» и пряталась при свопе.
     drawKobra(c, x, gY){
       const green = 0x6f8f5b, greenDk = 0x47603a;
-      const bodyH = 168, A = 26;                 // тело выше Алисы (~150)
-      const faceY = gY - bodyH - 20;
+      const bodyH = 168, A = 26, faceY = -(bodyH + 20);   // локальные координаты (низ = 0)
+      const kg = this.add.container(x, gY);
 
-      // S-тело (застывшее, не извивается) — толстая линия по синусоиде
+      // S-тело (застывшее) — толстая линия по синусоиде
       const g = this.add.graphics();
-      g.lineStyle(14, green, 1);
-      g.beginPath();
       const N = 26;
-      for (let i = 0; i <= N; i++){
-        const t = i/N;
-        const yy = gY - t*bodyH;
-        const xx = x + A*Math.sin(t*Math.PI*2);
-        if (i === 0) g.moveTo(xx, yy); else g.lineTo(xx, yy);
-      }
-      g.strokePath();
-      // брюшко (светлая тонкая линия поверх)
-      g.lineStyle(4, 0xcdd9a6, 0.5);
-      g.beginPath();
-      for (let i = 0; i <= N; i++){
-        const t = i/N; const yy = gY - t*bodyH; const xx = x + A*Math.sin(t*Math.PI*2);
-        if (i === 0) g.moveTo(xx, yy); else g.lineTo(xx, yy);
-      }
-      g.strokePath();
-      c.add(g);
+      const strokeS = () => { g.beginPath(); for (let i=0;i<=N;i++){ const t=i/N; const yy=-t*bodyH; const xx=A*Math.sin(t*Math.PI*2); if(i===0)g.moveTo(xx,yy); else g.lineTo(xx,yy);} g.strokePath(); };
+      g.lineStyle(14, green, 1); strokeS();
+      g.lineStyle(4, 0xcdd9a6, 0.5); strokeS();          // брюшко
+      kg.add(g);
 
       // капюшон (раздутый), за лицом
       const hood = this.add.graphics();
-      hood.fillStyle(green, 1);      hood.fillEllipse(x, faceY + 16, 96, 78);
-      hood.fillStyle(greenDk, 1);    hood.fillEllipse(x, faceY + 16, 62, 50);
-      // «очки» кобры — метка на капюшоне
-      hood.fillStyle(0xdfe8c4, 0.9);
-      hood.fillCircle(x - 12, faceY + 30, 4); hood.fillCircle(x + 12, faceY + 30, 4);
-      c.add(hood);
+      hood.fillStyle(green, 1);   hood.fillEllipse(0, faceY + 16, 96, 78);
+      hood.fillStyle(greenDk, 1); hood.fillEllipse(0, faceY + 16, 62, 50);
+      hood.fillStyle(0xdfe8c4, 0.9); hood.fillCircle(-12, faceY + 30, 4); hood.fillCircle(12, faceY + 30, 4);
+      kg.add(hood);
 
-      // лицо: настоящий спрайт assets/kobra.png (Дарья Верещагина), иначе плейсхолдер
+      // лицо: assets/kobra.png (Дарья Верещагина), иначе плейсхолдер
       if (this.kobraLoaded){
         const src = this.textures.get("kobra").getSourceImage();
-        const targetH = 92;                       // высота головы в капюшоне
-        const face = this.add.image(x, faceY + 2, "kobra").setOrigin(0.5, 0.5)
-          .setScale(targetH / src.height);
-        c.add(face);
+        kg.add(this.add.image(0, faceY + 2, "kobra").setOrigin(0.5, 0.5).setScale(92 / src.height));
       } else {
-        const f = this.add.graphics();
-        const R = 22;
-        f.fillStyle(0xd9c27a, 1); f.fillCircle(x, faceY, R + 3);            // волосы
-        f.fillStyle(COLORS.skin, 1); f.fillCircle(x, faceY + 2, R - 2);     // лицо
-        f.fillStyle(0xd9c27a, 1); f.fillEllipse(x, faceY - R + 10, R*2, 18);// чёлка
-        f.fillStyle(COLORS.ink, 1);
-        f.fillCircle(x - 8, faceY + 2, 2.6); f.fillCircle(x + 8, faceY + 2, 2.6);
-        f.lineStyle(2.4, COLORS.ink, 1);                                    // строгий ровный рот
-        f.beginPath(); f.moveTo(x - 7, faceY + 10); f.lineTo(x + 7, faceY + 10); f.strokePath();
-        f.lineStyle(2, 0xc0392b, 1);                                        // раздвоенный язычок
-        f.beginPath(); f.moveTo(x, faceY + 12); f.lineTo(x, faceY + 20); f.strokePath();
-        f.beginPath(); f.moveTo(x, faceY + 20); f.lineTo(x - 4, faceY + 24); f.strokePath();
-        f.beginPath(); f.moveTo(x, faceY + 20); f.lineTo(x + 4, faceY + 24); f.strokePath();
-        c.add(f);
+        const f = this.add.graphics(); const R = 22;
+        f.fillStyle(0xd9c27a, 1); f.fillCircle(0, faceY, R + 3);
+        f.fillStyle(COLORS.skin, 1); f.fillCircle(0, faceY + 2, R - 2);
+        f.fillStyle(0xd9c27a, 1); f.fillEllipse(0, faceY - R + 10, R*2, 18);
+        f.fillStyle(COLORS.ink, 1); f.fillCircle(-8, faceY + 2, 2.6); f.fillCircle(8, faceY + 2, 2.6);
+        f.lineStyle(2.4, COLORS.ink, 1); f.beginPath(); f.moveTo(-7, faceY + 10); f.lineTo(7, faceY + 10); f.strokePath();
+        f.lineStyle(2, 0xc0392b, 1);
+        f.beginPath(); f.moveTo(0, faceY + 12); f.lineTo(0, faceY + 20); f.strokePath();
+        f.beginPath(); f.moveTo(0, faceY + 20); f.lineTo(-4, faceY + 24); f.strokePath();
+        f.beginPath(); f.moveTo(0, faceY + 20); f.lineTo(4, faceY + 24); f.strokePath();
+        kg.add(f);
       }
+      c.add(kg);
+
+      // дыхание: лёгкий scaleY, заякорено у пола
+      kg.setScale(1, 1);
+      this.tweens.add({ targets: kg, scaleY: 1.05, duration: 1500 + Math.random()*400,
+        yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
+      return kg;
     }
 
     // плакат на стене: бумага + рамка + акцентная полоса + жирный текст, лёгкий наклон
@@ -1001,11 +981,17 @@
       }
       this.updateHell(time);
 
-      // лёгкое «покачивание» при ходьбе
-      if (onGround && Math.abs(b.velocity.x) > 10){
-        a.rotation = Math.sin(time*0.02) * 0.05;
+      // Кобра дышит (лёгкий scaleY), Алиса покачивается при ходьбе
+      if (kobraMode){
+        a.rotation = 0;
+        a.scaleY = 1 + 0.04 * Math.sin(time*0.004);
       } else {
-        a.rotation = Phaser.Math.Linear(a.rotation, 0, 0.2);
+        a.scaleY = 1;
+        if (onGround && Math.abs(b.velocity.x) > 10){
+          a.rotation = Math.sin(time*0.02) * 0.05;
+        } else {
+          a.rotation = Phaser.Math.Linear(a.rotation, 0, 0.2);
+        }
       }
 
       // не даём провалиться если что-то пошло не так
