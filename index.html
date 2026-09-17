@@ -155,8 +155,15 @@
       // рюкзак (0..BAG_MAX) и кумулятивная пирамида (сохраняется)
       this.carried = 0;
       this.pyramid = loadPyramid();
-      this.lifts = [];            // порталы-лифты: {x, segIndex}
+      this.lifts = [];            // порталы-лифты: {x, segIndex, guarded}
       this._dumping = false;
+
+      // рокировка со Злым Близнецом
+      this.playingAs = "alice";   // 'alice' | 'kobra'
+      this.hellMode = false;
+      this.prevX = 200;
+      this._armedLift = null;     // кобровский лифт «на прицеле» при полном рюкзаке
+      this.gatekeeper = null;     // АС, оставшаяся привратницей
 
       this.buildInitialWorld();
 
@@ -165,6 +172,7 @@
 
       // ---- HUD ----
       this.buildHUD();
+      this.buildHell();
 
       // gentle: спрятать подсказку по первому вводу
       this._hideHint = () => {
@@ -188,7 +196,11 @@
       this.liftPrompt.setVisible(false);
       const hint = document.getElementById("hint"); if (hint) hint.classList.add("hide");
       this.pts = {}; this.jumpReq = null; this.dumpReq = false;   // гасим ввод
+      this._armedLift = null;
       this.alice.setVelocity(0, 0);
+
+      // режим Кобры: сброс не в Апофеозошную, а во ТЬМУ
+      if (this.playingAs === "kobra"){ this.lastTribute = 0; this.toVoid(); return; }
 
       // таможня Кобры Орват: забирает 1–2 роутера, потом пропускает в Апофеозошную
       if (lift && lift.guarded && this.carried > 0){
@@ -238,6 +250,16 @@
       });
     }
 
+    toVoid(){
+      this.blipLift();
+      const cam = this.cameras.main;
+      cam.fadeOut(500, 0, 0, 0);
+      cam.once("camerafadeoutcomplete", () => {
+        this.scene.launch("apotheosis", { carried: this.carried, void: true });
+        this.scene.pause();
+      });
+    }
+
     blipHiss(){
       try{
         const AC = window.AudioContext || window.webkitAudioContext; if(!AC) return;
@@ -254,9 +276,80 @@
       if (!this._dumping) return;
       this._dumping = false;
       this.carried = 0;
-      this.pyramid = loadPyramid();     // обновлено сценой апофеоза
+      this.pyramid = loadPyramid();     // в режиме Кобры Тьма ничего не сохраняет
       this.updateHUD();
       this.cameras.main.fadeIn(500, 0, 0, 0);
+      // сброс во Тьму завершён — Злой Близнец отпускает, возвращаемся к АС
+      if (this.playingAs === "kobra") this.swapToAlice();
+    }
+
+    // ---------- Рокировка со Злым Близнецом ----------
+    buildHell(){
+      const W = this.scale.gameSize.width, H = this.scale.gameSize.height;
+      this.darkOverlay = this.add.rectangle(0, 0, W, H, 0x000000, 0)
+        .setOrigin(0,0).setScrollFactor(0).setDepth(30).setVisible(false);
+      this.redOverlay = this.add.rectangle(0, 0, W, H, 0x5a0000, 0)
+        .setOrigin(0,0).setScrollFactor(0).setDepth(31).setVisible(false);
+      this.flameLayer = this.add.container(0,0).setDepth(5).setVisible(false);
+    }
+
+    updateHell(time){
+      if (!this.hellMode) return;
+      const W = this.scale.gameSize.width, H = this.scale.gameSize.height;
+      this.darkOverlay.setSize(W, H).setFillStyle(0x000000, 0.55);
+      const pulse = 0.12 + 0.10*(0.5 + 0.5*Math.sin(time*0.006));
+      this.redOverlay.setSize(W, H).setFillStyle(0x5a0000, pulse);
+      // адское пламя изнутри лифтов
+      this.flameLayer.removeAll(true);
+      const flick = 0.5 + 0.5*Math.sin(time*0.02);
+      for (const l of this.lifts){
+        this.flameLayer.add(this.add.ellipse(l.x, this.groundY - 90, 110, 190, 0xff3b00, 0.28 + 0.18*flick));
+        this.flameLayer.add(this.add.ellipse(l.x, this.groundY - 70, 70, 150, 0xffb03a, 0.30 + 0.20*flick));
+      }
+    }
+
+    setHell(on){
+      this.hellMode = on;
+      this.darkOverlay.setVisible(on);
+      this.redOverlay.setVisible(on);
+      this.flameLayer.setVisible(on);
+      if (!on) this.flameLayer.removeAll(true);
+      this.cameras.main.setBackgroundColor(on ? "#120306" : "#0e1116");
+    }
+
+    swapToKobra(lift){
+      if (this.playingAs === "kobra") return;
+      this.playingAs = "kobra";
+      // АС остаётся привратницей у этого лифта
+      if (this.gatekeeper) this.gatekeeper.destroy();
+      this.gatekeeper = this.add.image(lift.x, this.groundY, "alice").setOrigin(0.5, 1).setDepth(6);
+      // игрок теперь — Кобра, рюкзак обнуляется (свои 16 сгорели)
+      this.carried = 0; this.updateHUD();
+      const a = this.alice;
+      a.setTexture("kobraSprite");
+      a.body.setSize(52, 190).setOffset(a.width/2 - 26, a.height - 190);
+      a.setFlipX(false);
+      this.setHell(true);
+      this.blipLift();
+      this.flashTitle("ЗЛОЙ БЛИЗНЕЦ ЗАБРАЛ ТВОЮ ЖИЗНЬ", "#ff5a5a");
+    }
+
+    swapToAlice(){
+      this.playingAs = "alice";
+      if (this.gatekeeper){ this.gatekeeper.destroy(); this.gatekeeper = null; }
+      const a = this.alice;
+      a.setTexture("alice");
+      a.body.setSize(46, 118).setOffset(a.width/2 - 23, a.height - 118);
+      this.carried = 0; this.updateHUD();
+      this.setHell(false);
+    }
+
+    flashTitle(text, color){
+      const t = this.add.text(this.scale.gameSize.width/2, this.scale.gameSize.height*0.35, text,
+        {fontFamily:"sans-serif", fontStyle:"bold", fontSize:"20px", color:color||"#fff", align:"center",
+         backgroundColor:"rgba(0,0,0,0.6)", padding:{x:12,y:8}})
+        .setOrigin(0.5).setScrollFactor(0).setDepth(46);
+      this.tweens.add({ targets:t, alpha:0, delay:1400, duration:800, onComplete:()=>t.destroy() });
     }
 
     blipLift(){
@@ -276,6 +369,49 @@
     makeTextures(){
       this.makeAliceTexture();
       this.makeRouterTexture();
+      this.makeKobraTexture();
+    }
+
+    // управляемый спрайт Кобры (для рокировки): S-тело + капюшон + лицо
+    makeKobraTexture(){
+      const w = 120, h = 210, x = w/2;
+      const bodyH = 168, A = 26;
+      const faceY = h - bodyH - 16;             // локальные координаты (низ = h)
+
+      const g = this.add.graphics();
+      // S-тело
+      g.lineStyle(14, 0x6f8f5b, 1);
+      g.beginPath();
+      const N = 26;
+      for (let i = 0; i <= N; i++){ const t=i/N; const yy=h - t*bodyH; const xx=x + A*Math.sin(t*Math.PI*2); if(i===0) g.moveTo(xx,yy); else g.lineTo(xx,yy); }
+      g.strokePath();
+      g.lineStyle(4, 0xcdd9a6, 0.5);
+      g.beginPath();
+      for (let i = 0; i <= N; i++){ const t=i/N; const yy=h - t*bodyH; const xx=x + A*Math.sin(t*Math.PI*2); if(i===0) g.moveTo(xx,yy); else g.lineTo(xx,yy); }
+      g.strokePath();
+      // капюшон
+      g.fillStyle(0x6f8f5b, 1);  g.fillEllipse(x, faceY + 16, 96, 78);
+      g.fillStyle(0x47603a, 1);  g.fillEllipse(x, faceY + 16, 62, 50);
+      g.fillStyle(0xdfe8c4, 0.9); g.fillCircle(x-12, faceY+30, 4); g.fillCircle(x+12, faceY+30, 4);
+
+      if (this.kobraLoaded){
+        g.generateTexture("kobraBody", w, h); g.destroy();
+        const src = this.textures.get("kobra").getSourceImage();
+        const targetH = 92, sc = targetH / src.height;
+        const face = this.add.image(x, faceY + 2, "kobra").setOrigin(0.5, 0.5).setScale(sc).setVisible(false);
+        const rt = this.make.renderTexture({ width:w, height:h }, false);
+        rt.draw("kobraBody", 0, 0); rt.draw(face, x, faceY + 2); rt.saveTexture("kobraSprite");
+        face.destroy();
+      } else {
+        // плейсхолдер-лицо (блондинка)
+        const R = 22;
+        g.fillStyle(0xd9c27a, 1); g.fillCircle(x, faceY, R + 3);
+        g.fillStyle(COLORS.skin, 1); g.fillCircle(x, faceY + 2, R - 2);
+        g.fillStyle(0xd9c27a, 1); g.fillEllipse(x, faceY - R + 10, R*2, 18);
+        g.fillStyle(COLORS.ink, 1); g.fillCircle(x-8, faceY+2, 2.6); g.fillCircle(x+8, faceY+2, 2.6);
+        g.lineStyle(2.4, COLORS.ink, 1); g.beginPath(); g.moveTo(x-7, faceY+10); g.lineTo(x+7, faceY+10); g.strokePath();
+        g.generateTexture("kobraSprite", w, h); g.destroy();
+      }
     }
 
     makeAliceTexture(){
@@ -838,16 +974,32 @@
       this._jumpHeld = kbdJump;
 
       // портал-лифт: подсказка у ближайшего лифта + выгрузка по свайпу вниз
+      const kobraMode = this.playingAs === "kobra";
       const near = this.lifts.find(l => Math.abs(a.x - l.x) < 70);
-      this.atLift = !!near && onGround && this.carried > 0 && !this._dumping;
+      this.atLift = !!near && onGround && !this._dumping &&
+                    (kobraMode ? this.carried >= 16 : this.carried > 0);
       if (this.liftPrompt){
         if (this.atLift){
-          this.liftPrompt.setText(near.guarded ? "свайп ↓ — выгрузить · Кобра берёт пошлину" : "свайп ↓ — выгрузить");
+          this.liftPrompt.setText(kobraMode ? "свайп ↓ — во ТЬМУ"
+                        : (near.guarded ? "свайп ↓ — выгрузить · Кобра берёт пошлину" : "свайп ↓ — выгрузить"));
           this.liftPrompt.setVisible(true).setPosition(near.x, this.groundY - 210);
         } else this.liftPrompt.setVisible(false);
       }
       const dumpReq = this.dumpReq; this.dumpReq = false;
       if (dumpReq && this.atLift) this.startDump(near);
+
+      // РОКИРОВКА: полный (16) рюкзак вошёл в зону кобровского лифта и ушёл, не заплатив
+      if (!kobraMode && !this._dumping && this.carried >= 16){
+        if (near && near.guarded){
+          this._armedLift = near;                       // взяли на прицел
+        } else if (this._armedLift && Math.abs(a.x - this._armedLift.x) > 78){
+          const l = this._armedLift; this._armedLift = null;
+          this.swapToKobra(l);                          // покинула зону, не заплатив → рокировка
+        }
+      } else {
+        this._armedLift = null;
+      }
+      this.updateHell(time);
 
       // лёгкое «покачивание» при ходьбе
       if (onGround && Math.abs(b.velocity.x) > 10){
@@ -869,6 +1021,7 @@
       cam.scrollY = 0;
 
       this.maxX = Math.max(this.maxX, a.x);
+      this.prevX = a.x;
       this.updateHUD();
 
       // покачивание роутеров
@@ -957,6 +1110,8 @@
       this.canReturn = false;
       this.cameras.main.fadeIn(500, 0, 0, 0);
 
+      if (data && data.void){ this.createVoid(W, H); return; }
+
       // небо (охра→марево) и выжженная земля
       this.add.rectangle(0, 0, W, H, 0xd9b25a).setOrigin(0,0);
       this.add.rectangle(0, H*0.42, W, H*0.22, 0xce9c46, 0.7).setOrigin(0,0);
@@ -995,6 +1150,50 @@
       this.time.delayedCall(500, () => this.animateDump());
       this.input.on("pointerdown", () => { if (this.canReturn) this.returnToCorridor(); });
       this.input.keyboard.on("keydown", () => { if (this.canReturn) this.returnToCorridor(); });
+    }
+
+    // ТЬМА: сброс роутеров в ничто (пирамида не растёт)
+    createVoid(W, H){
+      this.cameras.main.setBackgroundColor("#020103");
+      this.add.rectangle(0, 0, W, H, 0x020103, 1).setOrigin(0,0);
+      this.add.text(W/2, H*0.16, "ТЬМА", {fontFamily:"Georgia, serif", fontStyle:"bold",
+        fontSize:"40px", color:"#3a0d0d", letterSpacing:6}).setOrigin(0.5);
+
+      const n = this.carried;
+      let done = 0;
+      if (n === 0){ this.voidFinish(); }
+      for (let i = 0; i < n; i++){
+        const img = this.add.image(W/2 + (Math.random()-0.5)*W*0.5, -20 - Math.random()*60, "router")
+          .setScale(0.5).setTint(0x2a2a30).setDepth(2);
+        this.tweens.add({
+          targets: img, y: H + 40, angle:(Math.random()-0.5)*220, alpha:0,
+          delay: i*80, duration: 900 + Math.random()*400, ease: "Quad.easeIn",
+          onComplete: () => { img.destroy(); if (++done === n) this.voidFinish(); }
+        });
+      }
+      this.blipVoid();
+      this.input.on("pointerdown", () => { if (this.canReturn) this.returnToCorridor(); });
+      this.input.keyboard.on("keydown", () => { if (this.canReturn) this.returnToCorridor(); });
+    }
+
+    voidFinish(){
+      // пирамида НЕ сохраняется — всё сгорело во Тьме
+      const W = this.scale.gameSize.width, H = this.scale.gameSize.height;
+      this.add.text(W/2, H*0.52, "они сгинули\nтап — назад", {fontFamily:"sans-serif",
+        fontSize:"16px", color:"#8a4a4a", align:"center"}).setOrigin(0.5).setDepth(6);
+      this.canReturn = true;
+    }
+
+    blipVoid(){
+      try{
+        const AC = window.AudioContext || window.webkitAudioContext; if(!AC) return;
+        if(!this._ac) this._ac = new AC(); const ac=this._ac; if(ac.state==="suspended") ac.resume();
+        const o=ac.createOscillator(), g=ac.createGain();
+        o.type="sine"; o.frequency.setValueAtTime(70, ac.currentTime);
+        o.frequency.exponentialRampToValueAtTime(28, ac.currentTime+1.2);
+        g.gain.setValueAtTime(0.08, ac.currentTime); g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime+1.3);
+        o.connect(g).connect(ac.destination); o.start(); o.stop(ac.currentTime+1.3);
+      }catch(e){}
     }
 
     // число полных рядов пирамиды для count элементов
