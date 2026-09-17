@@ -94,11 +94,11 @@
       // Слот для «прифотошопленной» головы АС.
       // Положи прозрачный PNG в assets/head.png — он подставится вместо плейсхолдера.
       this.headLoaded = false;
+      this.kobraLoaded = false;
       this.load.image("head", "assets/head.png");
-      this.load.on("loaderror", (file) => {
-        if (file && file.key === "head") this.headLoaded = false;
-      });
+      this.load.image("kobra", "assets/kobra.png");   // лицо Кобры Орват (Дарья Верещагина)
       this.load.on("filecomplete-image-head", () => { this.headLoaded = true; });
+      this.load.on("filecomplete-image-kobra", () => { this.kobraLoaded = true; });
     }
 
     create(){
@@ -478,22 +478,29 @@
       hood.fillCircle(x - 12, faceY + 30, 4); hood.fillCircle(x + 12, faceY + 30, 4);
       c.add(hood);
 
-      // лицо-плейсхолдер (блондинка — оммаж Коре Орват)
-      const f = this.add.graphics();
-      const R = 22;
-      f.fillStyle(0xd9c27a, 1); f.fillCircle(x, faceY, R + 3);            // волосы
-      f.fillStyle(COLORS.skin, 1); f.fillCircle(x, faceY + 2, R - 2);     // лицо
-      f.fillStyle(0xd9c27a, 1); f.fillEllipse(x, faceY - R + 10, R*2, 18);// чёлка
-      f.fillStyle(COLORS.ink, 1);
-      f.fillCircle(x - 8, faceY + 2, 2.6); f.fillCircle(x + 8, faceY + 2, 2.6);
-      f.lineStyle(2.4, COLORS.ink, 1);                                    // строгий ровный рот
-      f.beginPath(); f.moveTo(x - 7, faceY + 10); f.lineTo(x + 7, faceY + 10); f.strokePath();
-      // раздвоенный язычок
-      f.lineStyle(2, 0xc0392b, 1);
-      f.beginPath(); f.moveTo(x, faceY + 12); f.lineTo(x, faceY + 20); f.strokePath();
-      f.beginPath(); f.moveTo(x, faceY + 20); f.lineTo(x - 4, faceY + 24); f.strokePath();
-      f.beginPath(); f.moveTo(x, faceY + 20); f.lineTo(x + 4, faceY + 24); f.strokePath();
-      c.add(f);
+      // лицо: настоящий спрайт assets/kobra.png (Дарья Верещагина), иначе плейсхолдер
+      if (this.kobraLoaded){
+        const src = this.textures.get("kobra").getSourceImage();
+        const targetH = 92;                       // высота головы в капюшоне
+        const face = this.add.image(x, faceY + 2, "kobra").setOrigin(0.5, 0.5)
+          .setScale(targetH / src.height);
+        c.add(face);
+      } else {
+        const f = this.add.graphics();
+        const R = 22;
+        f.fillStyle(0xd9c27a, 1); f.fillCircle(x, faceY, R + 3);            // волосы
+        f.fillStyle(COLORS.skin, 1); f.fillCircle(x, faceY + 2, R - 2);     // лицо
+        f.fillStyle(0xd9c27a, 1); f.fillEllipse(x, faceY - R + 10, R*2, 18);// чёлка
+        f.fillStyle(COLORS.ink, 1);
+        f.fillCircle(x - 8, faceY + 2, 2.6); f.fillCircle(x + 8, faceY + 2, 2.6);
+        f.lineStyle(2.4, COLORS.ink, 1);                                    // строгий ровный рот
+        f.beginPath(); f.moveTo(x - 7, faceY + 10); f.lineTo(x + 7, faceY + 10); f.strokePath();
+        f.lineStyle(2, 0xc0392b, 1);                                        // раздвоенный язычок
+        f.beginPath(); f.moveTo(x, faceY + 12); f.lineTo(x, faceY + 20); f.strokePath();
+        f.beginPath(); f.moveTo(x, faceY + 20); f.lineTo(x - 4, faceY + 24); f.strokePath();
+        f.beginPath(); f.moveTo(x, faceY + 20); f.lineTo(x + 4, faceY + 24); f.strokePath();
+        c.add(f);
+      }
     }
 
     // плакат на стене: бумага + рамка + акцентная полоса + жирный текст, лёгкий наклон
